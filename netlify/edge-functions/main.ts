@@ -39,6 +39,47 @@ const DESCRIPTION =
   "Base address. Method: GET. Send query ?address=0x... Price $0.01 USDC on Base; " +
   "pay the payTo in this 402 challenge, then retry with header X-Payment-Tx: <txHash>.";
 
+const OPENAPI = {
+  openapi: "3.1.0",
+  info: {
+    title: "Base Wallet Report",
+    version: "1.0.0",
+    description: DESCRIPTION,
+  },
+  paths: {
+    "/x402/base-wallet-report": {
+      get: {
+        summary: "Live Base wallet report (ETH + USDC balances, tx count)",
+        operationId: "baseWalletReport",
+        parameters: [{
+          name: "address",
+          in: "query",
+          required: true,
+          description:
+            "The Base address to report on (0x-prefixed, 20-byte hex).",
+          schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+        }],
+        responses: {
+          "200": { description: "Wallet report JSON (after x402 payment)." },
+          "402": {
+            description:
+              "x402 payment challenge: pay accepts[0], then retry with header 'X-Payment-Tx: <txHash>'.",
+          },
+        },
+        "x-x402": {
+          x402Version: 2,
+          scheme: "exact",
+          network: NETWORK,
+          amount: String(PRICE_ATOMIC),
+          asset: USDC,
+          payTo: PAY_TO,
+          paymentHeader: "X-Payment-Tx",
+        },
+      },
+    },
+  },
+};
+
 const UA = {
   "User-Agent":
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
@@ -244,16 +285,43 @@ async function handler(req: Request): Promise<Response> {
       }],
     });
   }
+  if (u.pathname === "/openapi.json") {
+    return sendJson(200, OPENAPI);
+  }
+  if (u.pathname === "/.well-known/x402.json") {
+    return sendJson(200, {
+      x402Version: 2,
+      resources: [{
+        url: "/x402/base-wallet-report",
+        type: "http",
+        method: "GET",
+        description: DESCRIPTION,
+        accepts: challenge("/x402/base-wallet-report").accepts,
+        proof:
+          "Pay accepts[0] by a direct USDC transfer to payTo on Base, " +
+          "then retry with header 'X-Payment-Tx: <txHash>'.",
+      }],
+    });
+  }
   if (u.pathname === "/x402/base-wallet-report") {
-    const address = u.searchParams.get("address") ?? "";
-    if (!address) {
-      return sendJson(400, {
-        error: "missing ?address=0x... query parameter",
-      });
-    }
+    // Paywall BEFORE request validation: an unpaid request always gets the
+    // 402 challenge, even without ?address= (discovery tools like x402scan
+    // probe the bare URL and require a 402 there).
     const txhash = req.headers.get("x-payment-tx");
     if (!txhash) {
       return paymentRequired("/x402/base-wallet-report");
+    }
+    const address = u.searchParams.get("address") ?? "";
+    if (!address) {
+      return paymentRequired(
+        "/x402/base-wallet-report",
+        "Payment proof received, but the request is missing ?address=0x... — resend with the address to get the report.",
+      );
+    }
+    if (!(address.startsWith("0x") && address.length === 42)) {
+      return sendJson(400, {
+        error: "address must be a 0x-prefixed 20-byte hex address",
+      });
     }
     const [ok, reason] = await verifyPayment(txhash.trim());
     if (!ok) {
