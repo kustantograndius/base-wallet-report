@@ -1,0 +1,2 @@
+# Base Wallet Report is Python-stdlib only — no dependencies.
+# This file exists so Render detects a Python service.

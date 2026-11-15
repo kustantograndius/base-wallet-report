@@ -1,0 +1,17 @@
+# Render fallback blueprint — Base Wallet Report (Python version).
+# Use only if the Deno Deploy route fails. Render reads this file when the
+# repo is imported as a Blueprint, or configure the same values manually.
+# server.py is stdlib-only (no dependencies); it honors $PORT (set by
+# Render automatically) and $HOST (must be 0.0.0.0 so Render can route).
+services:
+  - type: web
+    name: base-wallet-report
+    runtime: python
+    plan: free
+    buildCommand: "echo stdlib-only, nothing to build"
+    startCommand: "python3 server.py"
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      # PORT is injected by Render — do not set it here.
+    healthCheckPath: /health
