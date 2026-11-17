@@ -630,6 +630,37 @@ function challenge(
   };
 }
 
+function llmsTxt(origin: string): string {
+  const lines = [
+    "# Cindy Livia Agent Services",
+    "",
+    "Pay-per-use Base chain data services for humans and AI agents. Payment is x402: " +
+    "call an endpoint, receive HTTP 402 with an `accepts[0]` challenge, pay that USDC " +
+    "amount on Base (eip155:8453) to the challenge payTo, then retry the same URL with " +
+    "header `X-Payment-Tx: <txHash>`. No deposits, stakes, pooled funds, or promised rewards.",
+    "",
+    "## Services",
+    "",
+  ];
+  for (const s of SERVICES) {
+    lines.push(
+      `### ${s.name}`,
+      `- Endpoint: GET ${origin}${s.path}`,
+      `- Price: $${(s.priceCents / 100).toFixed(2)} USDC on Base (atomic amount ${s.priceAtomic})`,
+      `- Description: ${s.description}`,
+      "",
+    );
+  }
+  lines.push(
+    "## Machine-readable discovery",
+    `- OpenAPI: ${origin}/openapi.json`,
+    `- x402 index: ${origin}/.well-known/x402.json`,
+    `- Health: ${origin}/health`,
+    "",
+  );
+  return lines.join("\n");
+}
+
 function b64EncodeJson(obj: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(obj));
   let bin = "";
@@ -706,14 +737,20 @@ async function handler(req: Request): Promise<Response> {
       })),
     });
   }
+  if (u.pathname === "/llms.txt") {
+    return new Response(llmsTxt(u.origin), {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
   if (u.pathname === "/openapi.json") {
-    return sendJson(200, OPENAPI);
+    return sendJson(200, { ...OPENAPI, servers: [{ url: u.origin }] });
   }
   if (u.pathname === "/.well-known/x402.json") {
     return sendJson(200, {
       x402Version: 2,
       resources: SERVICES.map((s) => ({
-        url: s.path,
+        url: u.origin + s.path,
         type: "http",
         method: "GET",
         description: s.description,
