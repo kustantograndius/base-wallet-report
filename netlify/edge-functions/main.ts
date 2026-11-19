@@ -17,6 +17,15 @@
 // - GET /x402/base-wallet-report?address=0x... ($0.01)
 // - GET /x402/agent-reward-proof?tx=0x...&to=0x... ($0.05)
 // - GET /x402/base-token-snapshot?address=0x... ($0.05)
+// - GET /x402/erc20-balance?token=0x...&address=0x... ($0.003)
+// - GET /x402/tx-receipt?tx=0x... ($0.003)
+// - GET /x402/ens-resolve?name=vitalik.eth | ?address=0x... ($0.003)
+// - GET /x402/gas-estimate ($0.002)
+// - GET /x402/contract-info?address=0x... ($0.005)
+//
+// Granular on-chain read suite (Hunt C P1, prepared 2026-11-19): five
+// small single-purpose reads priced in the proven $0.002–0.005 band,
+// following the exact same challenge/gate flow as the original three.
 //
 // Payment model (x402, direct-transfer proof):
 // - Unpaid request -> HTTP 402 with a V2-style challenge (body +
@@ -45,6 +54,12 @@ const PRICE_ATOMIC = 10000; // 0.01 USDC
 const PRICE_CENTS = 1;
 const PREMIUM_PRICE_ATOMIC = 50000; // 0.05 USDC
 const PREMIUM_PRICE_CENTS = 5;
+const MICRO_PRICE_ATOMIC = 3000; // 0.003 USDC (granular read suite)
+const MICRO_PRICE_CENTS = 0.3;
+const GAS_PRICE_ATOMIC = 2000; // 0.002 USDC (gas-estimate)
+const GAS_PRICE_CENTS = 0.2;
+const INFO_PRICE_ATOMIC = 5000; // 0.005 USDC (contract-info)
+const INFO_PRICE_CENTS = 0.5;
 const NETWORK = "eip155:8453";
 const RPCS = ["https://mainnet.base.org", "https://base-rpc.publicnode.com"];
 const TRANSFER_TOPIC =
@@ -76,6 +91,44 @@ const TOKEN_SNAPSHOT_DESCRIPTION =
   "/x402/base-token-snapshot?address=0x... - price $0.05 USDC on Base " +
   "mainnet, paid per call with x402. Factual chain data only, not a safety " +
   "guarantee.";
+
+const ERC20_BALANCE_DESCRIPTION =
+  "ERC20 balance check on Base: the balance, symbol, and decimals of any " +
+  "ERC20 token for any wallet address, read from chain at request time. " +
+  "Use it for granular balance lookups before a transfer or for agent " +
+  "bookkeeping. GET /x402/erc20-balance?token=0x...&address=0x... - " +
+  "price $0.003 USDC on Base mainnet, paid per call with x402.";
+
+const TX_RECEIPT_DESCRIPTION =
+  "Base transaction receipt summary: confirmation status, block, " +
+  "confirmations, gas used, effective gas price and total fee, native " +
+  "value, ERC20 transfer count, and the contracts that emitted logs, " +
+  "decoded from the on-chain receipt. Use it to confirm what a Base " +
+  "transaction actually did. GET /x402/tx-receipt?tx=0x... - price " +
+  "$0.003 USDC on Base mainnet, paid per call with x402.";
+
+const ENS_RESOLVE_DESCRIPTION =
+  "ENS resolution: forward-resolve an ENS name to its Ethereum address, " +
+  "or reverse-resolve an address to its primary ENS name, read live from " +
+  "the ENS registry and public resolvers on Ethereum mainnet. Use it to " +
+  "turn a human-readable name into a verified address. GET " +
+  "/x402/ens-resolve?name=vitalik.eth or ?address=0x... - price $0.003 " +
+  "USDC on Base mainnet, paid per call with x402.";
+
+const GAS_ESTIMATE_DESCRIPTION =
+  "Base gas estimate: the current gas price and base fee on Base, plus " +
+  "the estimated cost of a native ETH transfer (21,000 gas) and a " +
+  "typical ERC20 transfer at request time. Use it to budget transaction " +
+  "costs before sending on Base. GET /x402/gas-estimate - price $0.002 " +
+  "USDC on Base mainnet, paid per call with x402.";
+
+const CONTRACT_INFO_DESCRIPTION =
+  "Base contract info for any address: is-contract check, bytecode size " +
+  "and Keccak-256 code hash, ERC20 metadata when the contract exposes " +
+  "it, owner() when available, and proxy detection across the EIP-1967 " +
+  "implementation, admin, and beacon slots. GET " +
+  "/x402/contract-info?address=0x... - price $0.005 USDC on Base " +
+  "mainnet, paid per call with x402. Factual chain data only.";
 
 interface ServiceDef {
   id: string;
@@ -186,10 +239,168 @@ const TOKEN_SNAPSHOT_SERVICE: ServiceDef = {
   },
 };
 
+const ERC20_BALANCE_SERVICE: ServiceDef = {
+  id: "erc20-balance",
+  name: "ERC20 Balance (Base)",
+  path: "/x402/erc20-balance",
+  priceAtomic: MICRO_PRICE_ATOMIC,
+  priceCents: MICRO_PRICE_CENTS,
+  description: ERC20_BALANCE_DESCRIPTION,
+  tags: ["base", "erc20", "balance", "onchain-data"],
+  exampleQueryParams: { token: USDC, address: PAY_TO },
+  queryParamSchemas: { token: ADDRESS_SCHEMA, address: ADDRESS_SCHEMA },
+  requiredQueryParams: ["token", "address"],
+  outputExample: {
+    service: "erc20-balance",
+    chain: "Base mainnet (eip155:8453)",
+    block: 30123456,
+    token: USDC,
+    token_symbol: "USDC",
+    token_decimals: 6,
+    address: PAY_TO,
+    balance_atomic: "12500000",
+    balance: "12.5",
+    served_by: "Cindy Livia — ERC20 Balance (x402)",
+    served_at_unix: 1763539200,
+  },
+};
+
+const TX_RECEIPT_SERVICE: ServiceDef = {
+  id: "tx-receipt",
+  name: "Base TX Receipt Summary",
+  path: "/x402/tx-receipt",
+  priceAtomic: MICRO_PRICE_ATOMIC,
+  priceCents: MICRO_PRICE_CENTS,
+  description: TX_RECEIPT_DESCRIPTION,
+  tags: ["base", "transactions", "receipts", "gas", "onchain-data"],
+  exampleQueryParams: { tx: EXAMPLE_TX },
+  queryParamSchemas: { tx: TX_SCHEMA },
+  requiredQueryParams: ["tx"],
+  outputExample: {
+    service: "tx-receipt",
+    subject_tx: EXAMPLE_TX,
+    chain: "Base mainnet (eip155:8453)",
+    found: true,
+    block: 30123456,
+    confirmations: 128,
+    status: "success",
+    from: PAY_TO,
+    to: USDC,
+    value_eth: "0",
+    gas_used: 52000,
+    transaction_fee_eth: "0.00000026",
+    erc20_transfer_count: 1,
+    log_count: 1,
+    served_by: "Cindy Livia — Base TX Receipt (x402)",
+    served_at_unix: 1763539200,
+  },
+};
+
+const ENS_NAME_SCHEMA = {
+  type: "string",
+  pattern: "^[a-z0-9-]+(\\.[a-z0-9-]+)+$",
+};
+const EXAMPLE_ENS_ADDRESS = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+
+const ENS_RESOLVE_SERVICE: ServiceDef = {
+  id: "ens-resolve",
+  name: "ENS Resolve",
+  path: "/x402/ens-resolve",
+  priceAtomic: MICRO_PRICE_ATOMIC,
+  priceCents: MICRO_PRICE_CENTS,
+  description: ENS_RESOLVE_DESCRIPTION,
+  tags: ["ethereum", "ens", "identity", "onchain-data"],
+  exampleQueryParams: { name: "vitalik.eth" },
+  queryParamSchemas: { name: ENS_NAME_SCHEMA, address: ADDRESS_SCHEMA },
+  requiredQueryParams: [],
+  outputExample: {
+    service: "ens-resolve",
+    chain: "Ethereum mainnet (ENS)",
+    name: "vitalik.eth",
+    address: EXAMPLE_ENS_ADDRESS.toLowerCase(),
+    primary_name: "vitalik.eth",
+    served_by: "Cindy Livia — ENS Resolve (x402)",
+    served_at_unix: 1763539200,
+  },
+};
+
+const GAS_ESTIMATE_SERVICE: ServiceDef = {
+  id: "gas-estimate",
+  name: "Base Gas Estimate",
+  path: "/x402/gas-estimate",
+  priceAtomic: GAS_PRICE_ATOMIC,
+  priceCents: GAS_PRICE_CENTS,
+  description: GAS_ESTIMATE_DESCRIPTION,
+  tags: ["base", "gas", "fees", "onchain-data"],
+  exampleQueryParams: {},
+  queryParamSchemas: {},
+  requiredQueryParams: [],
+  outputExample: {
+    service: "gas-estimate",
+    chain: "Base mainnet (eip155:8453)",
+    block: 30123456,
+    gas_price_wei: "5000000",
+    gas_price_gwei: "0.005",
+    native_transfer: {
+      gas_units: 21000,
+      cost_wei: "105000000000",
+      cost_eth: "0.000000105",
+    },
+    erc20_transfer: {
+      gas_units: 50000,
+      cost_wei: "250000000000",
+      cost_eth: "0.00000025",
+      estimate_source: "eth_estimateGas (USDC transfer)",
+    },
+    served_by: "Cindy Livia — Base Gas Estimate (x402)",
+    served_at_unix: 1763539200,
+  },
+};
+
+const CONTRACT_INFO_SERVICE: ServiceDef = {
+  id: "contract-info",
+  name: "Base Contract Info",
+  path: "/x402/contract-info",
+  priceAtomic: INFO_PRICE_ATOMIC,
+  priceCents: INFO_PRICE_CENTS,
+  description: CONTRACT_INFO_DESCRIPTION,
+  tags: ["base", "contracts", "proxy", "erc20", "due-diligence"],
+  exampleQueryParams: { address: USDC },
+  queryParamSchemas: { address: ADDRESS_SCHEMA },
+  requiredQueryParams: ["address"],
+  outputExample: {
+    service: "contract-info",
+    address: USDC,
+    chain: "Base mainnet (eip155:8453)",
+    is_contract: true,
+    code_size_bytes: 2200,
+    code_hash: "0x9f8b2f2b6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+    is_erc20: true,
+    name: "USD Coin",
+    symbol: "USDC",
+    decimals: 6,
+    owner: null,
+    proxy: {
+      is_proxy: true,
+      implementation: null,
+      admin: null,
+      beacon: null,
+      beacon_implementation: null,
+    },
+    served_by: "Cindy Livia — Base Contract Info (x402)",
+    served_at_unix: 1763539200,
+  },
+};
+
 const SERVICES: ServiceDef[] = [
   WALLET_SERVICE,
   REWARD_PROOF_SERVICE,
   TOKEN_SNAPSHOT_SERVICE,
+  ERC20_BALANCE_SERVICE,
+  TX_RECEIPT_SERVICE,
+  ENS_RESOLVE_SERVICE,
+  GAS_ESTIMATE_SERVICE,
+  CONTRACT_INFO_SERVICE,
 ];
 
 function x402Block(service: ServiceDef) {
@@ -208,7 +419,7 @@ const OPENAPI = {
   openapi: "3.1.0",
   info: {
     title: "Cindy Livia Agent Services",
-    version: "1.1.0",
+    version: "1.2.0",
     description:
       "Pay-per-use Base chain data services for humans and AI agents. No deposits, stakes, pooled funds, or promised rewards.",
   },
@@ -285,6 +496,123 @@ const OPENAPI = {
           },
         },
         "x-x402": x402Block(TOKEN_SNAPSHOT_SERVICE),
+      },
+    },
+    "/x402/erc20-balance": {
+      get: {
+        summary: "ERC20 token balance + symbol + decimals for an address on Base",
+        operationId: "erc20Balance",
+        parameters: [
+          {
+            name: "token",
+            in: "query",
+            required: true,
+            description: "The ERC20 token contract address on Base.",
+            schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+          },
+          {
+            name: "address",
+            in: "query",
+            required: true,
+            description: "The wallet address whose balance is read.",
+            schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+          },
+        ],
+        responses: {
+          "200": { description: "Balance JSON (after x402 payment)." },
+          "402": {
+            description:
+              "x402 payment challenge: pay accepts[0], then retry with header 'X-Payment-Tx: <txHash>'.",
+          },
+        },
+        "x-x402": x402Block(ERC20_BALANCE_SERVICE),
+      },
+    },
+    "/x402/tx-receipt": {
+      get: {
+        summary: "Decoded Base transaction receipt summary",
+        operationId: "txReceipt",
+        parameters: [{
+          name: "tx",
+          in: "query",
+          required: true,
+          description: "The Base transaction hash to summarize.",
+          schema: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" },
+        }],
+        responses: {
+          "200": { description: "Receipt summary JSON (after x402 payment)." },
+          "402": {
+            description:
+              "x402 payment challenge: pay accepts[0], then retry with header 'X-Payment-Tx: <txHash>'.",
+          },
+        },
+        "x-x402": x402Block(TX_RECEIPT_SERVICE),
+      },
+    },
+    "/x402/ens-resolve": {
+      get: {
+        summary: "Resolve an ENS name to an address, or an address to its primary ENS name",
+        operationId: "ensResolve",
+        parameters: [
+          {
+            name: "name",
+            in: "query",
+            required: false,
+            description: "ENS name to forward-resolve (e.g. vitalik.eth).",
+            schema: { type: "string", pattern: "^[a-z0-9-]+(\\.[a-z0-9-]+)+$" },
+          },
+          {
+            name: "address",
+            in: "query",
+            required: false,
+            description: "Address to reverse-resolve (used when name is absent).",
+            schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+          },
+        ],
+        responses: {
+          "200": { description: "Resolution JSON (after x402 payment)." },
+          "402": {
+            description:
+              "x402 payment challenge: pay accepts[0], then retry with header 'X-Payment-Tx: <txHash>'.",
+          },
+        },
+        "x-x402": x402Block(ENS_RESOLVE_SERVICE),
+      },
+    },
+    "/x402/gas-estimate": {
+      get: {
+        summary: "Current Base gas price + estimated transfer costs",
+        operationId: "gasEstimate",
+        parameters: [],
+        responses: {
+          "200": { description: "Gas estimate JSON (after x402 payment)." },
+          "402": {
+            description:
+              "x402 payment challenge: pay accepts[0], then retry with header 'X-Payment-Tx: <txHash>'.",
+          },
+        },
+        "x-x402": x402Block(GAS_ESTIMATE_SERVICE),
+      },
+    },
+    "/x402/contract-info": {
+      get: {
+        summary: "Contract info: is-contract, code size/hash, ERC20 metadata, proxy detection",
+        operationId: "contractInfo",
+        parameters: [{
+          name: "address",
+          in: "query",
+          required: true,
+          description: "The Base address to inspect (contract or EOA).",
+          schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+        }],
+        responses: {
+          "200": { description: "Contract info JSON (after x402 payment)." },
+          "402": {
+            description:
+              "x402 payment challenge: pay accepts[0], then retry with header 'X-Payment-Tx: <txHash>'.",
+          },
+        },
+        "x-x402": x402Block(CONTRACT_INFO_SERVICE),
       },
     },
   },
@@ -435,6 +763,13 @@ function formatUnits(value: bigint, decimals: number): string {
     ? ""
     : digits.slice(-decimals).replace(/0+$/, "");
   return (negative ? "-" : "") + whole + (fraction ? "." + fraction : "");
+}
+
+function priceLabel(service: ServiceDef): string {
+  // Exact USD label from the atomic USDC amount (6 decimals): 10000 ->
+  // "$0.01", 3000 -> "$0.003". Identical output to the old cents-based
+  // formatting for the $0.01 / $0.05 services.
+  return "$" + formatUnits(BigInt(service.priceAtomic), 6);
 }
 
 function bytesFromHex(hex: string): Uint8Array {
@@ -690,6 +1025,472 @@ async function tokenSnapshot(address: string) {
     },
     warnings,
     served_by: "Cindy Livia — Base Token Snapshot (x402)",
+    served_at_unix: Math.floor(Date.now() / 1000),
+  };
+}
+
+// --- Keccak-256 (pure TS; Web Crypto offers SHA3, not Keccak) -----------
+// Original Keccak padding (domain byte 0x01), NOT FIPS SHA3 (0x06).
+// Needed for ENS namehash and contract code hashes.
+const KECCAK_RC: bigint[] = [
+  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an,
+  0x8000000080008000n, 0x000000000000808bn, 0x0000000080000001n,
+  0x8000000080008081n, 0x8000000000008009n, 0x000000000000008an,
+  0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n,
+  0x8000000000008003n, 0x8000000000008002n, 0x8000000000000080n,
+  0x000000000000800an, 0x800000008000000an, 0x8000000080008081n,
+  0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
+];
+// Rotation offsets r[x + 5*y] (Keccak spec, Table 2).
+const KECCAK_ROT: number[] = [
+  0, 1, 62, 28, 27,
+  36, 44, 6, 55, 20,
+  3, 10, 43, 25, 39,
+  41, 45, 15, 21, 8,
+  18, 2, 61, 56, 14,
+];
+const MASK64 = (1n << 64n) - 1n;
+
+function rotl64(x: bigint, n: number): bigint {
+  if (n === 0) return x;
+  const b = BigInt(n);
+  return ((x << b) | (x >> (64n - b))) & MASK64;
+}
+
+function keccakF1600(a: bigint[]): void {
+  for (let round = 0; round < 24; round++) {
+    const c: bigint[] = new Array(5);
+    for (let x = 0; x < 5; x++) {
+      c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+    }
+    for (let x = 0; x < 5; x++) {
+      const d = c[(x + 4) % 5] ^ rotl64(c[(x + 1) % 5], 1);
+      for (let y = 0; y < 5; y++) a[x + 5 * y] ^= d;
+    }
+    const b: bigint[] = new Array(25).fill(0n);
+    for (let x = 0; x < 5; x++) {
+      for (let y = 0; y < 5; y++) {
+        b[y + 5 * ((2 * x + 3 * y) % 5)] =
+          rotl64(a[x + 5 * y], KECCAK_ROT[x + 5 * y]);
+      }
+    }
+    for (let y = 0; y < 5; y++) {
+      for (let x = 0; x < 5; x++) {
+        a[x + 5 * y] = b[x + 5 * y] ^
+          ((~b[((x + 1) % 5) + 5 * y] & MASK64) & b[((x + 2) % 5) + 5 * y]);
+      }
+    }
+    a[0] ^= KECCAK_RC[round];
+  }
+}
+
+function keccak256(data: Uint8Array): Uint8Array {
+  const rate = 136; // 1088-bit rate for Keccak-256
+  const state: bigint[] = new Array(25).fill(0n);
+  const padded = new Uint8Array(
+    data.length + (rate - (data.length % rate)),
+  );
+  padded.set(data);
+  padded[data.length] = 0x01;
+  padded[padded.length - 1] |= 0x80;
+  for (let off = 0; off < padded.length; off += rate) {
+    for (let i = 0; i < rate / 8; i++) {
+      let lane = 0n;
+      for (let j = 7; j >= 0; j--) {
+        lane = (lane << 8n) | BigInt(padded[off + i * 8 + j]);
+      }
+      state[i] ^= lane;
+    }
+    keccakF1600(state);
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 4; i++) {
+    let lane = state[i];
+    for (let j = 0; j < 8; j++) {
+      out[i * 8 + j] = Number(lane & 0xffn);
+      lane >>= 8n;
+    }
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += b.toString(16).padStart(2, "0");
+  return s;
+}
+
+function keccak256Hex(hex: string): string {
+  return "0x" + bytesToHex(keccak256(bytesFromHex(hex)));
+}
+
+function namehash(name: string): string {
+  let node: Uint8Array = new Uint8Array(32);
+  if (name !== "") {
+    const labels = name.split(".");
+    for (let i = labels.length - 1; i >= 0; i--) {
+      const labelHash = keccak256(new TextEncoder().encode(labels[i]));
+      const buf = new Uint8Array(64);
+      buf.set(node, 0);
+      buf.set(labelHash, 32);
+      node = keccak256(buf);
+    }
+  }
+  return "0x" + bytesToHex(node);
+}
+
+// --- ENS (Ethereum mainnet reads; payment still settles on Base) --------
+const ENS_REGISTRY = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e";
+const ETH_RPCS = [
+  "https://ethereum-rpc.publicnode.com",
+  "https://eth.drpc.org",
+  "https://eth-mainnet.public.blastapi.io",
+];
+
+// deno-lint-ignore no-explicit-any
+async function rpcEth(method: string, params: unknown[]): Promise<any> {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
+  let last: unknown = null;
+  for (const url of ETH_RPCS) {
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: UA,
+        body,
+        signal: AbortSignal.timeout(20000),
+      });
+      const out = await r.json();
+      if (out && typeof out === "object" && "error" in out) {
+        throw new Error(JSON.stringify(out.error));
+      }
+      return out.result;
+    } catch (e) {
+      last = e; // try next RPC
+    }
+  }
+  throw new Error(`all Ethereum RPCs failed: ${last}`);
+}
+
+async function optionalEnsCall(to: string, data: string): Promise<unknown> {
+  try {
+    const out = await rpcEth("eth_call", [{ to, data }, "latest"]);
+    return out === "0x" ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+async function ensResolverAddress(node: string): Promise<string | null> {
+  const out = await optionalEnsCall(
+    ENS_REGISTRY,
+    "0x0178b8bf" + node.slice(2), // resolver(bytes32)
+  );
+  return storageToAddress(out);
+}
+
+async function ensForwardResolve(
+  name: string,
+): Promise<{ address: string | null; resolver: string | null }> {
+  const node = namehash(name);
+  const resolver = await ensResolverAddress(node);
+  if (!resolver) return { address: null, resolver: null };
+  const out = await optionalEnsCall(
+    resolver,
+    "0x3b3b57de" + node.slice(2), // addr(bytes32)
+  );
+  return { address: storageToAddress(out), resolver };
+}
+
+async function ensReverseName(address: string): Promise<string | null> {
+  const node = namehash(address.toLowerCase().slice(2) + ".addr.reverse");
+  const resolver = await ensResolverAddress(node);
+  if (!resolver) return null;
+  const out = await optionalEnsCall(
+    resolver,
+    "0x691f3431" + node.slice(2), // name(bytes32)
+  );
+  const name = decodeAbiString(out);
+  return name && name.length > 0 ? name : null;
+}
+
+const ENS_NAME_RE =
+  /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+function isEnsName(value: string): boolean {
+  return value.length <= 253 && ENS_NAME_RE.test(value);
+}
+
+// --- Granular read suite builders ----------------------------------------
+
+async function erc20Balance(token: string, address: string) {
+  const meta = await tokenMetadata(token);
+  const data = "0x70a08231" + "0".repeat(24) + address.slice(2).toLowerCase();
+  const [balRaw, blockRaw] = await Promise.all([
+    optionalEthCall(token, data),
+    optionalRpc("eth_blockNumber", []),
+  ]);
+  const balance = typeof balRaw === "string" ? BigInt(balRaw) : null;
+  const warnings: string[] = [];
+  if (balance === null) {
+    warnings.push(
+      "balanceOf() did not return a value — the token address may not be an ERC-20 contract.",
+    );
+  }
+  if (meta.decimals === null) {
+    warnings.push("decimals() was not exposed; balance is reported atomic-only.");
+  }
+  return {
+    service: ERC20_BALANCE_SERVICE.id,
+    chain: "Base mainnet (eip155:8453)",
+    block: typeof blockRaw === "string" ? Number(BigInt(blockRaw)) : null,
+    token: token.toLowerCase(),
+    token_symbol: meta.symbol,
+    token_decimals: meta.decimals,
+    address,
+    balance_atomic: balance === null ? null : balance.toString(),
+    balance: balance === null || meta.decimals === null
+      ? null
+      : formatUnits(balance, meta.decimals),
+    warnings,
+    served_by: "Cindy Livia — ERC20 Balance (x402)",
+    served_at_unix: Math.floor(Date.now() / 1000),
+  };
+}
+
+async function txReceiptSummary(subjectTx: string) {
+  const receipt = await rpc("eth_getTransactionReceipt", [subjectTx]);
+  const tx = await rpc("eth_getTransactionByHash", [subjectTx]);
+  if (!receipt || !tx) {
+    return {
+      service: TX_RECEIPT_SERVICE.id,
+      subject_tx: subjectTx,
+      chain: "Base mainnet (eip155:8453)",
+      found: false,
+      reason: "transaction not found / not mined yet",
+      served_by: "Cindy Livia — Base TX Receipt (x402)",
+      served_at_unix: Math.floor(Date.now() / 1000),
+    };
+  }
+  const latest = BigInt(await rpc("eth_blockNumber", []));
+  const block = BigInt(receipt.blockNumber);
+  const gasUsed = BigInt(receipt.gasUsed ?? "0x0");
+  const effPrice = BigInt(receipt.effectiveGasPrice ?? "0x0");
+  const fee = gasUsed * effPrice;
+  const logs = receipt.logs ?? [];
+  let erc20Transfers = 0;
+  const emitters = new Set<string>();
+  for (const log of logs) {
+    if (log.address) emitters.add(String(log.address).toLowerCase());
+    const topics: string[] = log.topics ?? [];
+    if (
+      topics.length >= 3 && topics[0].toLowerCase() === TRANSFER_TOPIC
+    ) {
+      erc20Transfers++;
+    }
+  }
+  const value = BigInt(tx.value ?? "0x0");
+  const input = typeof tx.input === "string" ? tx.input : "0x";
+  return {
+    service: TX_RECEIPT_SERVICE.id,
+    subject_tx: subjectTx,
+    chain: "Base mainnet (eip155:8453)",
+    found: true,
+    block: Number(block),
+    confirmations: Number(latest - block + 1n),
+    status: receipt.status === "0x1" ? "success" : "reverted",
+    from: tx.from ?? null,
+    to: tx.to ?? null,
+    is_contract_creation: tx.to == null,
+    contract_created: receipt.contractAddress ?? null,
+    value_wei: value.toString(),
+    value_eth: formatUnits(value, 18),
+    gas_used: Number(gasUsed),
+    effective_gas_price_wei: effPrice.toString(),
+    effective_gas_price_gwei: formatUnits(effPrice, 9),
+    transaction_fee_wei: fee.toString(),
+    transaction_fee_eth: formatUnits(fee, 18),
+    erc20_transfer_count: erc20Transfers,
+    log_count: logs.length,
+    log_emitter_count: emitters.size,
+    log_emitters: [...emitters].slice(0, 25),
+    method_id: input.length >= 10 ? input.slice(0, 10) : null,
+    calldata_bytes: (input.length - 2) / 2,
+    served_by: "Cindy Livia — Base TX Receipt (x402)",
+    served_at_unix: Math.floor(Date.now() / 1000),
+  };
+}
+
+async function ensResolve(name: string, address: string) {
+  const base = {
+    service: ENS_RESOLVE_SERVICE.id,
+    chain: "Ethereum mainnet (ENS)",
+    served_by: "Cindy Livia — ENS Resolve (x402)",
+    served_at_unix: Math.floor(Date.now() / 1000),
+  };
+  if (name) {
+    const { address: resolved, resolver } = await ensForwardResolve(name);
+    const primaryName = resolved ? await ensReverseName(resolved) : null;
+    return {
+      ...base,
+      name,
+      address: resolved,
+      resolver,
+      primary_name: primaryName,
+      note: resolved
+        ? null
+        : "No resolver or no address record set for this name.",
+    };
+  }
+  const addr = address.toLowerCase();
+  const foundName = await ensReverseName(addr);
+  let verified: boolean | null = null;
+  if (foundName) {
+    const fwd = await ensForwardResolve(foundName);
+    verified = fwd.address === addr;
+  }
+  return {
+    ...base,
+    address: addr,
+    name: foundName,
+    verified,
+    note: foundName ? null : "No reverse record set for this address.",
+  };
+}
+
+async function gasEstimate() {
+  const transferData = "0xa9059cbb" +
+    "0".repeat(24) + PAY_TO.slice(2).toLowerCase() +
+    "0".repeat(64); // transfer(PAY_TO, 0) — zero-amount, estimates cleanly
+  const [gasPriceRaw, blockRaw, estimateRaw] = await Promise.all([
+    rpc("eth_gasPrice", []),
+    rpc("eth_getBlockByNumber", ["latest", false]),
+    optionalRpc("eth_estimateGas", [{
+      from: PAY_TO,
+      to: USDC,
+      data: transferData,
+    }]),
+  ]);
+  const gasPrice = BigInt(gasPriceRaw);
+  const baseFee = blockRaw?.baseFeePerGas
+    ? BigInt(blockRaw.baseFeePerGas)
+    : null;
+  const erc20Units = typeof estimateRaw === "string"
+    ? BigInt(estimateRaw)
+    : 65000n;
+  const cost = (units: bigint) => {
+    const wei = units * gasPrice;
+    return {
+      gas_units: Number(units),
+      cost_wei: wei.toString(),
+      cost_eth: formatUnits(wei, 18),
+    };
+  };
+  return {
+    service: GAS_ESTIMATE_SERVICE.id,
+    chain: "Base mainnet (eip155:8453)",
+    block: blockRaw?.number ? Number(BigInt(blockRaw.number)) : null,
+    gas_price_wei: gasPrice.toString(),
+    gas_price_gwei: formatUnits(gasPrice, 9),
+    base_fee_wei: baseFee === null ? null : baseFee.toString(),
+    base_fee_gwei: baseFee === null ? null : formatUnits(baseFee, 9),
+    native_transfer: cost(21000n),
+    erc20_transfer: {
+      ...cost(erc20Units),
+      estimate_source: typeof estimateRaw === "string"
+        ? "eth_estimateGas (USDC transfer)"
+        : "reference value (eth_estimateGas unavailable)",
+    },
+    served_by: "Cindy Livia — Base Gas Estimate (x402)",
+    served_at_unix: Math.floor(Date.now() / 1000),
+  };
+}
+
+const EIP1967_IMPL_SLOT =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+const EIP1967_ADMIN_SLOT =
+  "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
+const EIP1967_BEACON_SLOT =
+  "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
+
+async function contractInfo(address: string) {
+  const [
+    codeRaw,
+    nameRaw,
+    symbolRaw,
+    decimalsRaw,
+    supplyRaw,
+    ownerRaw,
+    implRaw,
+    adminRaw,
+    beaconRaw,
+  ] = await Promise.all([
+    optionalRpc("eth_getCode", [address, "latest"]),
+    optionalEthCall(address, "0x06fdde03"),
+    optionalEthCall(address, "0x95d89b41"),
+    optionalEthCall(address, "0x313ce567"),
+    optionalEthCall(address, "0x18160ddd"),
+    optionalEthCall(address, "0x8da5cb5b"),
+    optionalRpc("eth_getStorageAt", [address, EIP1967_IMPL_SLOT, "latest"]),
+    optionalRpc("eth_getStorageAt", [address, EIP1967_ADMIN_SLOT, "latest"]),
+    optionalRpc("eth_getStorageAt", [address, EIP1967_BEACON_SLOT, "latest"]),
+  ]);
+  const code = typeof codeRaw === "string" ? codeRaw : "0x";
+  const isContract = code !== "0x";
+  const decimals = typeof decimalsRaw === "string"
+    ? Number(BigInt(decimalsRaw))
+    : null;
+  const supply = typeof supplyRaw === "string" ? BigInt(supplyRaw) : null;
+  const name = decodeAbiString(nameRaw);
+  const symbol = decodeAbiString(symbolRaw);
+  const isErc20 = isContract && symbol !== null && decimals !== null &&
+    supply !== null;
+  const implementation = storageToAddress(implRaw);
+  const admin = storageToAddress(adminRaw);
+  const beacon = storageToAddress(beaconRaw);
+  let beaconImplementation: string | null = null;
+  if (beacon) {
+    const out = await optionalEthCall(beacon, "0x5c60da1b"); // implementation()
+    beaconImplementation = storageToAddress(out);
+  }
+  const warnings = [
+    "Factual chain data only; this info is not a safety guarantee or investment advice.",
+  ];
+  if (!isContract) {
+    warnings.push(
+      "Address holds no bytecode — it is not a contract (EOA or not yet deployed).",
+    );
+  }
+  if (implementation || beacon) {
+    warnings.push(
+      "Proxy detected; inspect the implementation contract as well as this address.",
+    );
+  }
+  return {
+    service: CONTRACT_INFO_SERVICE.id,
+    address,
+    chain: "Base mainnet (eip155:8453)",
+    is_contract: isContract,
+    code_size_bytes: isContract ? (code.length - 2) / 2 : 0,
+    code_hash: isContract ? keccak256Hex(code) : null,
+    is_erc20: isErc20,
+    name,
+    symbol,
+    decimals,
+    total_supply_atomic: supply === null ? null : supply.toString(),
+    total_supply: supply === null || decimals === null
+      ? null
+      : formatUnits(supply, decimals),
+    owner: storageToAddress(ownerRaw),
+    proxy: {
+      is_proxy: implementation !== null || beacon !== null,
+      implementation,
+      admin,
+      beacon,
+      beacon_implementation: beaconImplementation,
+    },
+    warnings,
+    served_by: "Cindy Livia — Base Contract Info (x402)",
     served_at_unix: Math.floor(Date.now() / 1000),
   };
 }
@@ -1064,7 +1865,7 @@ function llmsTxt(origin: string): string {
     lines.push(
       `### ${s.name}`,
       `- Endpoint: GET ${origin}${s.path}`,
-      `- Price: $${(s.priceCents / 100).toFixed(2)} USDC on Base (atomic amount ${s.priceAtomic})`,
+      `- Price: ${priceLabel(s)} USDC on Base (atomic amount ${s.priceAtomic})`,
       `- Description: ${s.description}`,
       "",
     );
@@ -1114,6 +1915,67 @@ function paymentRequired(
   });
 }
 
+type ParamParse =
+  | { kind: "missing"; message: string }
+  | { kind: "invalid"; message: string }
+  | { kind: "ok"; build: () => Promise<unknown> };
+
+// Shared paywall flow for the granular suite — step-for-step the same as
+// the three original endpoint handlers above: facilitator gate first,
+// legacy X-Payment-Tx second, paywall before validation, missing params
+// answered with a 402, malformed params with a 400 (before any payment
+// tx is redeemed), then build + serve with the settlement receipt header.
+async function servePaidEndpoint(
+  req: Request,
+  u: URL,
+  service: ServiceDef,
+  failLabel: string,
+  parse: () => ParamParse,
+): Promise<Response> {
+  const absUrl = u.href; // full request URL incl. query: strict x402 clients require resource.url === request URL
+  const fac = await facilitatorGate(req, absUrl, service);
+  if (fac && !fac.ok) {
+    return paymentRequired(
+      absUrl,
+      service,
+      `Payment not accepted: ${fac.reason}`,
+    );
+  }
+  const txhash = req.headers.get("x-payment-tx");
+  if (!txhash && !fac) {
+    return paymentRequired(absUrl, service);
+  }
+  const parsed = parse();
+  if (parsed.kind === "missing") {
+    return paymentRequired(absUrl, service, parsed.message);
+  }
+  if (parsed.kind === "invalid") {
+    return sendJson(400, { error: parsed.message });
+  }
+  if (!fac) {
+    const [ok, reason] = await verifyPayment(
+      (txhash as string).trim(),
+      service.priceAtomic,
+    );
+    if (!ok) {
+      return paymentRequired(
+        absUrl,
+        service,
+        `Payment not accepted: ${reason}`,
+      );
+    }
+  }
+  try {
+    const resp = sendJson(200, await parsed.build());
+    if (fac?.paymentResponseHeader) {
+      resp.headers.set("payment-response", fac.paymentResponseHeader);
+    }
+    return resp;
+  } catch (e) {
+    return sendJson(502, { error: `${failLabel} failed: ${e}` });
+  }
+}
+
 async function handler(req: Request): Promise<Response> {
   const u = new URL(req.url);
   console.log("[svc]", req.method, u.pathname + u.search);
@@ -1140,7 +2002,7 @@ async function handler(req: Request): Promise<Response> {
       model: "Pay per use. No deposits, stakes, pooled funds, or promised rewards.",
       endpoints: SERVICES.map((s) => ({
         path: s.path,
-        price: `$${(s.priceCents / 100).toFixed(2)} USDC on Base (x402)`,
+        price: `${priceLabel(s)} USDC on Base (x402)`,
         description: s.description,
       })),
     });
@@ -1347,9 +2209,114 @@ async function handler(req: Request): Promise<Response> {
       return sendJson(502, { error: `token snapshot failed: ${e}` });
     }
   }
+  if (u.pathname === "/x402/erc20-balance") {
+    const service = ERC20_BALANCE_SERVICE;
+    return servePaidEndpoint(req, u, service, "balance check", () => {
+      const token = u.searchParams.get("token") ?? "";
+      const address = u.searchParams.get("address") ?? "";
+      if (!token || !address) {
+        return {
+          kind: "missing",
+          message:
+            "Payment proof received, but the request is missing ?token=0x... and/or ?address=0x... — resend with both to get the balance.",
+        };
+      }
+      if (!isAddress(token)) {
+        return {
+          kind: "invalid",
+          message: "token must be a 0x-prefixed 20-byte hex address",
+        };
+      }
+      if (!isAddress(address)) {
+        return {
+          kind: "invalid",
+          message: "address must be a 0x-prefixed 20-byte hex address",
+        };
+      }
+      return { kind: "ok", build: () => erc20Balance(token, address) };
+    });
+  }
+  if (u.pathname === "/x402/tx-receipt") {
+    const service = TX_RECEIPT_SERVICE;
+    return servePaidEndpoint(req, u, service, "receipt summary", () => {
+      const subjectTx = u.searchParams.get("tx") ??
+        u.searchParams.get("txhash") ?? "";
+      if (!subjectTx) {
+        return {
+          kind: "missing",
+          message:
+            "Payment proof received, but the request is missing ?tx=0x... for the transaction to summarize — resend with the transaction hash.",
+        };
+      }
+      if (!isTxHash(subjectTx)) {
+        return {
+          kind: "invalid",
+          message: "tx must be a 0x-prefixed 32-byte transaction hash",
+        };
+      }
+      return { kind: "ok", build: () => txReceiptSummary(subjectTx) };
+    });
+  }
+  if (u.pathname === "/x402/ens-resolve") {
+    const service = ENS_RESOLVE_SERVICE;
+    return servePaidEndpoint(req, u, service, "ENS resolution", () => {
+      const name = (u.searchParams.get("name") ?? "").trim().toLowerCase();
+      const address = u.searchParams.get("address") ?? "";
+      if (!name && !address) {
+        return {
+          kind: "missing",
+          message:
+            "Payment proof received, but the request is missing ?name=vitalik.eth or ?address=0x... — resend with one of them to resolve.",
+        };
+      }
+      if (name && !isEnsName(name)) {
+        return {
+          kind: "invalid",
+          message:
+            "name must be a valid ENS name (dot-separated labels of letters, digits, hyphens)",
+        };
+      }
+      if (address && !isAddress(address)) {
+        return {
+          kind: "invalid",
+          message: "address must be a 0x-prefixed 20-byte hex address",
+        };
+      }
+      return { kind: "ok", build: () => ensResolve(name, address) };
+    });
+  }
+  if (u.pathname === "/x402/gas-estimate") {
+    const service = GAS_ESTIMATE_SERVICE;
+    return servePaidEndpoint(req, u, service, "gas estimate", () => ({
+      kind: "ok",
+      build: () => gasEstimate(),
+    }));
+  }
+  if (u.pathname === "/x402/contract-info") {
+    const service = CONTRACT_INFO_SERVICE;
+    return servePaidEndpoint(req, u, service, "contract info", () => {
+      const address = u.searchParams.get("address") ?? "";
+      if (!address) {
+        return {
+          kind: "missing",
+          message:
+            "Payment proof received, but the request is missing ?address=0x... — resend with the address to inspect.",
+        };
+      }
+      if (!isAddress(address)) {
+        return {
+          kind: "invalid",
+          message: "address must be a 0x-prefixed 20-byte hex address",
+        };
+      }
+      return { kind: "ok", build: () => contractInfo(address) };
+    });
+  }
   return sendJson(404, { error: "not found" });
 }
 
 
 export default handler;
 export const config = { path: "/*" };
+// Exported for local tests (test-granular.ts): pure functions, no I/O.
+export { keccak256Hex, namehash };
