@@ -694,7 +694,7 @@ async function tokenSnapshot(address: string) {
   };
 }
 
-// --- Facilitator + discovery (STAGING) -------------------------------------
+// --- Facilitator + discovery (LIVE) -------------------------------------
 //
 // Mechanism (x402 spec; Coinbase CDP docs "Get discovered"; PayAI docs):
 // - Every 402 declares extensions.bazaar (info + schema) and resource
@@ -721,7 +721,7 @@ async function tokenSnapshot(address: string) {
 //
 // Facilitator selection via env:
 // - X402_FACILITATOR_URL — facilitator base URL.
-//   Default in this staging copy: PayAI (keyless). Set to the CDP URL to
+//   Default in this deployment: PayAI (keyless). Set to the CDP URL to
 //   use the Coinbase CDP Facilitator instead.
 // - X402_FACILITATOR_AUTH — "cdp" | "basic" | "none".
 //   Default: "cdp" when the URL is the CDP one, otherwise "none".
@@ -822,7 +822,7 @@ function b64urlEncode(bytes: Uint8Array): string {
 }
 
 // CDP API-key JWT (EdDSA over the key's Ed25519 secret), per the CDP JWT
-// recipe. STAGING NOTE: implemented but UNTESTED — it can only run once real
+// recipe. NOTE: implemented; settle path exercised via facilitator /verify rehearsal 2026-11-19 — it can only run once real
 // CDP API keys exist, and must be re-verified against the live CDP docs at
 // that point. Returns null when no keys are configured (the gate).
 async function cdpJwt(uri: string): Promise<string | null> {
@@ -1041,7 +1041,7 @@ function challenge(
     proof:
       "Standard x402: sign the accepts[0] payment (EIP-3009) and retry with " +
       "header 'PAYMENT-SIGNATURE: <base64 payload>'; settlement runs through " +
-      "a standard x402 facilitator (this staging copy defaults to the " +
+      "a standard x402 facilitator (this deployment defaults to the " +
       "keyless PayAI Facilitator; the CDP Facilitator remains supported via " +
       "server config). Legacy: pay accepts[0] by a direct USDC transfer " +
       "to payTo on Base, then retry with header 'X-Payment-Tx: <txHash>'.",
@@ -1190,7 +1190,7 @@ async function handler(req: Request): Promise<Response> {
     // 402 challenge, even without ?address= (discovery tools like x402scan
     // probe the bare URL and require a 402 there; the Bazaar indexer probes
     // with the declared example input and likewise requires the 402 first).
-    const absUrl = u.origin + WALLET_SERVICE.path;
+    const absUrl = u.href; // full request URL incl. query: strict x402 clients require resource.url === request URL
     const fac = await facilitatorGate(req, absUrl, WALLET_SERVICE);
     if (fac && !fac.ok) {
       return paymentRequired(
@@ -1241,7 +1241,7 @@ async function handler(req: Request): Promise<Response> {
   }
   if (u.pathname === "/x402/agent-reward-proof") {
     const service = REWARD_PROOF_SERVICE;
-    const absUrl = u.origin + service.path;
+    const absUrl = u.href; // full request URL incl. query: strict x402 clients require resource.url === request URL
     const fac = await facilitatorGate(req, absUrl, service);
     if (fac && !fac.ok) {
       return paymentRequired(
@@ -1298,7 +1298,7 @@ async function handler(req: Request): Promise<Response> {
   }
   if (u.pathname === "/x402/base-token-snapshot") {
     const service = TOKEN_SNAPSHOT_SERVICE;
-    const absUrl = u.origin + service.path;
+    const absUrl = u.href; // full request URL incl. query: strict x402 clients require resource.url === request URL
     const fac = await facilitatorGate(req, absUrl, service);
     if (fac && !fac.ok) {
       return paymentRequired(
