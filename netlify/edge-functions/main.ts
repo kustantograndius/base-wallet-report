@@ -1,4 +1,15 @@
 // Cindy Livia — paid x402 data services for humans and AI agents.
+//
+// *** LIVE DEPLOYMENT — facilitator switch, deployed 2026-11-19. ***
+// Adds discovery extensions (extensions.bazaar in every 402) and a standard
+// x402 payment path that settles through a configurable facilitator,
+// alongside the legacy direct-transfer proof path (unchanged). The default
+// facilitator is the KEYLESS PayAI Facilitator (free tier, no account/API
+// key); the Coinbase CDP Facilitator remains available as an alternative
+// config (X402_FACILITATOR_URL + X402_FACILITATOR_AUTH=cdp + CDP_API_KEY_ID /
+// CDP_API_KEY_SECRET). Audited pre-deploy: diff vs previous live = payment
+// plumbing only, suites 103/103 PASS (see bazaar-test + live-switch report).
+//
 // Netlify Edge port of ../server.py — same x402 V2 challenge format and
 // on-chain payment verification logic, extended with agent-focused checks.
 //
@@ -40,24 +51,31 @@ const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const MAX_TX_AGE_BLOCKS = 7200; // ~4h on Base (2s blocks)
 
+// Bazaar-facing descriptions. Hard limit: the CDP Facilitator rejects verify
+// and settle requests whose resource description exceeds 500 characters, so
+// every description below is kept under that (asserted in test-bazaar.ts).
 const DESCRIPTION =
-  "Base wallet report: live ETH + USDC balances and transaction count for any " +
-  "Base address. Method: GET. Send query ?address=0x... Price $0.01 USDC on Base; " +
-  "pay the payTo in this 402 challenge, then retry with header X-Payment-Tx: <txHash>.";
+  "Live Base wallet report: ETH balance, USDC balance, and transaction count " +
+  "for any Base address, read from chain at request time. Use it for a quick " +
+  "factual balance check before sending funds or during counterparty due " +
+  "diligence. GET /x402/base-wallet-report?address=0x... - price $0.01 USDC " +
+  "on Base mainnet, paid per call with x402.";
 
 const REWARD_PROOF_DESCRIPTION =
-  "Agent reward proof check: independently verify a claimed Base payment or reward. " +
-  "Method: GET. Send ?tx=0x... for the transaction to inspect and optionally ?to=0x... " +
-  "for the expected recipient. Returns confirmation status, every ERC20 transfer decoded, " +
-  "and totals to the expected recipient. Price $0.05 USDC on Base. Pay with a SEPARATE " +
-  "payment transaction to the payTo in this 402 challenge, then retry with header " +
-  "X-Payment-Tx: <paymentTxHash>.";
+  "Agent reward proof check: independently verify a Base transaction and " +
+  "decode every ERC20 transfer in it, with totals per recipient. Use it to " +
+  "confirm that a claimed payment or reward on Base actually happened and " +
+  "reached the expected recipient. GET /x402/agent-reward-proof?tx=0x... " +
+  "with optional &to=0x... - price $0.05 USDC on Base mainnet, paid per " +
+  "call with x402.";
 
 const TOKEN_SNAPSHOT_DESCRIPTION =
-  "Base token snapshot for agent due diligence: ERC20 name, symbol, decimals, total supply, " +
-  "contract code size, EIP-1967 proxy indicators, and owner() when exposed. Method: GET. " +
-  "Send query ?address=0x... Price $0.05 USDC on Base; pay the payTo in this 402 challenge, " +
-  "then retry with header X-Payment-Tx: <txHash>. This is factual chain data, not a safety guarantee.";
+  "Base token snapshot for due diligence: ERC20 name, symbol, decimals, " +
+  "total supply, contract code size, EIP-1967 proxy indicators, and owner() " +
+  "when exposed, for any token contract on Base. GET " +
+  "/x402/base-token-snapshot?address=0x... - price $0.05 USDC on Base " +
+  "mainnet, paid per call with x402. Factual chain data only, not a safety " +
+  "guarantee.";
 
 interface ServiceDef {
   id: string;
@@ -66,7 +84,22 @@ interface ServiceDef {
   priceAtomic: number;
   priceCents: number;
   description: string;
+  // Bazaar discovery metadata (spec: coinbase/x402 specs/extensions/bazaar).
+  tags: string[];
+  exampleQueryParams: Record<string, string>;
+  queryParamSchemas: Record<string, unknown>;
+  requiredQueryParams: string[];
+  outputExample: Record<string, unknown>;
 }
+
+const ADDRESS_SCHEMA = {
+  type: "string",
+  pattern: "^0x[0-9a-fA-F]{40}$",
+};
+const TX_SCHEMA = { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" };
+// A real Base transaction, reused as the reward-proof discovery example.
+const EXAMPLE_TX =
+  "0xd9ec1c0c64c9b13427fe682d3629686e64ddc985aaa8f5ffd924893593099d5b";
 
 const WALLET_SERVICE: ServiceDef = {
   id: "base-wallet-report",
@@ -75,6 +108,22 @@ const WALLET_SERVICE: ServiceDef = {
   priceAtomic: PRICE_ATOMIC,
   priceCents: PRICE_CENTS,
   description: DESCRIPTION,
+  tags: ["base", "wallet", "balances", "usdc", "onchain-data"],
+  exampleQueryParams: { address: PAY_TO },
+  queryParamSchemas: { address: ADDRESS_SCHEMA },
+  requiredQueryParams: ["address"],
+  outputExample: {
+    address: PAY_TO,
+    chain: "Base mainnet (eip155:8453)",
+    block: 30123456,
+    eth_balance: 0.001,
+    eth_balance_wei: "1000000000000000",
+    usdc_balance: 12.5,
+    usdc_balance_atomic: "12500000",
+    tx_count: 42,
+    served_by: "Cindy Livia — Base Wallet Report (x402)",
+    served_at_unix: 1763539200,
+  },
 };
 
 const REWARD_PROOF_SERVICE: ServiceDef = {
@@ -84,6 +133,25 @@ const REWARD_PROOF_SERVICE: ServiceDef = {
   priceAtomic: PREMIUM_PRICE_ATOMIC,
   priceCents: PREMIUM_PRICE_CENTS,
   description: REWARD_PROOF_DESCRIPTION,
+  tags: ["base", "payments", "verification", "erc20", "proof"],
+  exampleQueryParams: { tx: EXAMPLE_TX, to: PAY_TO },
+  queryParamSchemas: { tx: TX_SCHEMA, to: ADDRESS_SCHEMA },
+  requiredQueryParams: ["tx"],
+  outputExample: {
+    service: "agent-reward-proof",
+    subject_tx: EXAMPLE_TX,
+    chain: "Base mainnet (eip155:8453)",
+    block: 30123456,
+    confirmations: 128,
+    status: "success",
+    verified: true,
+    expected_recipient: PAY_TO,
+    erc20_transfers: [],
+    totals_to_expected_recipient: [],
+    transfer_count: 0,
+    served_by: "Cindy Livia — Agent Reward Proof Check (x402)",
+    served_at_unix: 1763539200,
+  },
 };
 
 const TOKEN_SNAPSHOT_SERVICE: ServiceDef = {
@@ -93,6 +161,29 @@ const TOKEN_SNAPSHOT_SERVICE: ServiceDef = {
   priceAtomic: PREMIUM_PRICE_ATOMIC,
   priceCents: PREMIUM_PRICE_CENTS,
   description: TOKEN_SNAPSHOT_DESCRIPTION,
+  tags: ["base", "erc20", "token", "due-diligence", "contracts"],
+  exampleQueryParams: { address: USDC },
+  queryParamSchemas: { address: ADDRESS_SCHEMA },
+  requiredQueryParams: ["address"],
+  outputExample: {
+    service: "base-token-snapshot",
+    address: USDC,
+    chain: "Base mainnet (eip155:8453)",
+    name: "USD Coin",
+    symbol: "USDC",
+    decimals: 6,
+    total_supply_atomic: "10000000000000",
+    total_supply: "10000000",
+    is_contract: true,
+    code_size_bytes: 2200,
+    owner: null,
+    proxy: { is_eip1967_proxy: true, implementation: null, admin: null },
+    warnings: [
+      "Factual chain data only; this snapshot is not a safety guarantee or investment advice.",
+    ],
+    served_by: "Cindy Livia — Base Token Snapshot (x402)",
+    served_at_unix: 1763539200,
+  },
 };
 
 const SERVICES: ServiceDef[] = [
@@ -603,6 +694,326 @@ async function tokenSnapshot(address: string) {
   };
 }
 
+// --- Facilitator + discovery (STAGING) -------------------------------------
+//
+// Mechanism (x402 spec; Coinbase CDP docs "Get discovered"; PayAI docs):
+// - Every 402 declares extensions.bazaar (info + schema) and resource
+//   service metadata (serviceName, tags). That alone passes CDP's free
+//   /x402/validate endpoint, but does NOT list the resource.
+// - Listing happens only when a payment SETTLES through a facilitator that
+//   runs a discovery catalog: the buyer echoes resource + extensions.bazaar
+//   in the PaymentPayload, the facilitator validates info against schema,
+//   catalogs the resource, and (CDP) reports the outcome in an
+//   EXTENSION-RESPONSES header (bazaar.status). PayAI runs its own catalog
+//   (GET /discovery/resources on the facilitator origin).
+// - Facilitator auth differs by provider:
+//   * CDP Facilitator: CDP API key ID + secret (JWT) — needs a Coinbase
+//     CDP account. Without keys, cdp mode refuses cleanly (see
+//     facilitatorGate).
+//   * PayAI Facilitator: KEYLESS free tier — no account, no API key. Each
+//     payTo starts with 1,000 free credits; a Base mainnet exact/EIP-3009
+//     settlement costs 1.56 credits (~$0.00156) per /pricing on
+//     2026-11-18, Base Sepolia settlements are free (0 credits). An
+//     optional paid tier authenticates with an API key id + secret sent
+//     as HTTP Basic.
+//   * OpenFacilitator (pay.openfacilitator.io): also keyless; kept as a
+//     fallback URL option.
+//
+// Facilitator selection via env:
+// - X402_FACILITATOR_URL — facilitator base URL.
+//   Default in this staging copy: PayAI (keyless). Set to the CDP URL to
+//   use the Coinbase CDP Facilitator instead.
+// - X402_FACILITATOR_AUTH — "cdp" | "basic" | "none".
+//   Default: "cdp" when the URL is the CDP one, otherwise "none".
+//   "basic" uses FACILITATOR_API_KEY_ID / FACILITATOR_API_KEY_SECRET.
+
+const CDP_FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402";
+const PAYAI_FACILITATOR_URL = "https://facilitator.payai.network";
+
+function facilitatorUrl(): string {
+  return envGet("X402_FACILITATOR_URL") ?? PAYAI_FACILITATOR_URL;
+}
+
+function facilitatorAuthMode(): "cdp" | "basic" | "none" {
+  const m = envGet("X402_FACILITATOR_AUTH");
+  if (m === "cdp" || m === "basic" || m === "none") return m;
+  return facilitatorUrl() === CDP_FACILITATOR_URL ? "cdp" : "none";
+}
+
+function facilitatorLabel(): string {
+  const u = facilitatorUrl();
+  if (u === CDP_FACILITATOR_URL) return "CDP Facilitator";
+  if (u === PAYAI_FACILITATOR_URL) return "PayAI Facilitator (keyless)";
+  return `facilitator at ${u}`;
+}
+const SERVICE_NAME = "Cindy Livia Agent Services";
+
+// deno-lint-ignore no-explicit-any
+function envGet(name: string): string | undefined {
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  try {
+    if (typeof g.Deno?.env?.get === "function") {
+      return g.Deno.env.get(name) ?? undefined;
+    }
+  } catch { /* not Deno */ }
+  try {
+    if (typeof g.process?.env?.[name] === "string") return g.process.env[name];
+  } catch { /* not Node */ }
+  return undefined;
+}
+
+function bazaarExtension(service: ServiceDef) {
+  return {
+    info: {
+      input: {
+        type: "http",
+        method: "GET",
+        queryParams: service.exampleQueryParams,
+      },
+      output: { type: "json", example: service.outputExample },
+    },
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        input: {
+          type: "object",
+          properties: {
+            type: { type: "string", const: "http" },
+            method: { type: "string", enum: ["GET", "HEAD", "DELETE"] },
+            queryParams: {
+              type: "object",
+              properties: service.queryParamSchemas,
+              required: service.requiredQueryParams,
+            },
+            headers: {
+              type: "object",
+              additionalProperties: { type: "string" },
+            },
+          },
+          required: ["type", "method"],
+          additionalProperties: false,
+        },
+        output: {
+          type: "object",
+          properties: {
+            type: { type: "string" },
+            example: { type: "object" },
+          },
+          required: ["type"],
+        },
+      },
+      required: ["input"],
+    },
+  };
+}
+
+function b64DecodeJson(text: string): unknown {
+  const bin = atob(text);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function b64urlEncode(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// CDP API-key JWT (EdDSA over the key's Ed25519 secret), per the CDP JWT
+// recipe. STAGING NOTE: implemented but UNTESTED — it can only run once real
+// CDP API keys exist, and must be re-verified against the live CDP docs at
+// that point. Returns null when no keys are configured (the gate).
+async function cdpJwt(uri: string): Promise<string | null> {
+  const keyId = envGet("CDP_API_KEY_ID");
+  const keySecret = envGet("CDP_API_KEY_SECRET");
+  if (!keyId || !keySecret) return null;
+  const { createPrivateKey, sign } = await import("node:crypto");
+  const raw = Uint8Array.from(atob(keySecret), (c) => c.charCodeAt(0));
+  const seed = raw.length > 32 ? raw.slice(0, 32) : raw;
+  const pkcs8 = new Uint8Array([
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
+    0x04, 0x22, 0x04, 0x20, ...seed,
+  ]);
+  const key = createPrivateKey({
+    key: Buffer.from(pkcs8),
+    format: "der",
+    type: "pkcs8",
+  });
+  const now = Math.floor(Date.now() / 1000);
+  const enc = (o: unknown) =>
+    b64urlEncode(new TextEncoder().encode(JSON.stringify(o)));
+  const signingInput = `${enc({ alg: "EdDSA", typ: "JWT", kid: keyId })}.${enc({
+    iss: "cdp",
+    sub: keyId,
+    aud: ["cdp_service"],
+    nbf: now,
+    exp: now + 120,
+    uris: [uri],
+  })}`;
+  const signature = sign(null, Buffer.from(signingInput), key);
+  return `${signingInput}.${b64urlEncode(new Uint8Array(signature))}`;
+}
+
+interface FacilitatorOutcome {
+  ok: boolean;
+  reason: string;
+  bazaarStatus?: string;
+  paymentResponseHeader?: string;
+}
+
+// Handles the standard x402 payment path (PAYMENT-SIGNATURE header).
+// Returns null when the request carries no such header (not this path).
+// On success the payment is verified AND settled via the configured
+// facilitator (default: keyless PayAI; CDP remains selectable) before
+// content is served, and any Bazaar extension outcome is captured.
+async function facilitatorGate(
+  req: Request,
+  resourceUrl: string,
+  service: ServiceDef,
+): Promise<FacilitatorOutcome | null> {
+  const sigHeader = req.headers.get("payment-signature");
+  if (!sigHeader) return null;
+  // deno-lint-ignore no-explicit-any
+  let payload: any;
+  try {
+    payload = b64DecodeJson(sigHeader);
+  } catch {
+    return { ok: false, reason: "malformed PAYMENT-SIGNATURE header" };
+  }
+  // Fail fast on junk before spending a facilitator call: our accepts[0] is
+  // an EVM exact (EIP-3009) requirement, so a genuine client payload must
+  // carry payload.authorization + payload.signature.
+  // deno-lint-ignore no-explicit-any
+  const inner = (payload as any)?.payload;
+  if (
+    !inner || typeof inner.signature !== "string" ||
+    !inner.authorization || typeof inner.authorization !== "object"
+  ) {
+    return {
+      ok: false,
+      reason:
+        "malformed payment payload: expected an EIP-3009 authorization " +
+        "and signature in the PAYMENT-SIGNATURE payload",
+    };
+  }
+  // Auth per configured facilitator (see facilitatorAuthMode):
+  // - "cdp": CDP API-key JWT (account gate — refuses cleanly without keys)
+  // - "basic": FACILITATOR_API_KEY_ID/SECRET as HTTP Basic (PayAI paid tier)
+  // - "none": keyless public facilitator (PayAI free tier, OpenFacilitator)
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const mode = facilitatorAuthMode();
+  if (mode === "cdp") {
+    const auth = await cdpJwt(
+      "POST api.cdp.coinbase.com/platform/v2/x402/settle",
+    );
+    if (!auth) {
+      return {
+        ok: false,
+        reason:
+          "standard x402 payment received, but the CDP Facilitator is not " +
+          "configured on this server (CDP_API_KEY_ID / CDP_API_KEY_SECRET " +
+          "missing). Settling through the CDP Facilitator requires a Coinbase " +
+          "CDP account API key.",
+      };
+    }
+    headers.Authorization = `Bearer ${auth}`;
+  } else if (mode === "basic") {
+    const keyId = envGet("FACILITATOR_API_KEY_ID");
+    const keySecret = envGet("FACILITATOR_API_KEY_SECRET");
+    if (!keyId || !keySecret) {
+      return {
+        ok: false,
+        reason:
+          "facilitator auth mode 'basic' is selected but " +
+          "FACILITATOR_API_KEY_ID / FACILITATOR_API_KEY_SECRET are missing " +
+          "on this server",
+      };
+    }
+    headers.Authorization = `Basic ${btoa(`${keyId}:${keySecret}`)}`;
+  }
+  const fUrl = facilitatorUrl();
+  // Clients are expected to echo resource + extensions from the 402. Fill
+  // them from our own declaration when absent so discovery can catalog.
+  payload.resource = {
+    url: resourceUrl,
+    description: service.description,
+    mimeType: "application/json",
+    serviceName: SERVICE_NAME,
+    tags: service.tags,
+  };
+  payload.extensions = {
+    ...(payload.extensions ?? {}),
+    bazaar: bazaarExtension(service),
+  };
+  const body = JSON.stringify({
+    x402Version: 2,
+    paymentPayload: payload,
+    paymentRequirements: challenge(resourceUrl, service).accepts[0],
+  });
+  const readBazaarStatus = (r: Response): string | undefined => {
+    const h = r.headers.get("extension-responses");
+    if (!h) return undefined;
+    try {
+      // deno-lint-ignore no-explicit-any
+      const obj = b64DecodeJson(h) as any;
+      return obj?.bazaar?.status as string | undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let bazaarStatus: string | undefined;
+  try {
+    const vr = await fetch(`${fUrl}/verify`, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(20000),
+    });
+    bazaarStatus = readBazaarStatus(vr);
+    // deno-lint-ignore no-explicit-any
+    const v = await vr.json() as any;
+    if (!v?.isValid) {
+      return {
+        ok: false,
+        reason: `facilitator verify rejected: ${v?.invalidReason ?? vr.status}`,
+        bazaarStatus,
+      };
+    }
+    const sr = await fetch(`${fUrl}/settle`, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(20000),
+    });
+    bazaarStatus = readBazaarStatus(sr) ?? bazaarStatus;
+    // deno-lint-ignore no-explicit-any
+    const s = await sr.json() as any;
+    if (!s?.success) {
+      return {
+        ok: false,
+        reason: `facilitator settle failed: ${s?.errorReason ?? sr.status}`,
+        bazaarStatus,
+      };
+    }
+    console.log(
+      `[facilitator] settled ${service.path} via ${facilitatorLabel()} ` +
+        `bazaar.status=${bazaarStatus ?? "n/a"}`,
+    );
+    return {
+      ok: true,
+      reason: "ok",
+      bazaarStatus,
+      paymentResponseHeader: b64EncodeJson(s),
+    };
+  } catch (e) {
+    return { ok: false, reason: `facilitator call failed: ${e}`, bazaarStatus };
+  }
+}
+
 function challenge(
   resourceUrl: string,
   service: ServiceDef = WALLET_SERVICE,
@@ -614,6 +1025,8 @@ function challenge(
       url: resourceUrl,
       description: service.description,
       mimeType: "application/json",
+      serviceName: SERVICE_NAME,
+      tags: service.tags,
     },
     accepts: [{
       scheme: "exact",
@@ -624,9 +1037,14 @@ function challenge(
       maxTimeoutSeconds: 600,
       extra: { name: "USD Coin", version: "2" },
     }],
+    extensions: { bazaar: bazaarExtension(service) },
     proof:
-      "Pay accepts[0] by a direct USDC transfer to payTo on Base, " +
-      "then retry this URL with header 'X-Payment-Tx: <txHash>'.",
+      "Standard x402: sign the accepts[0] payment (EIP-3009) and retry with " +
+      "header 'PAYMENT-SIGNATURE: <base64 payload>'; settlement runs through " +
+      "a standard x402 facilitator (this staging copy defaults to the " +
+      "keyless PayAI Facilitator; the CDP Facilitator remains supported via " +
+      "server config). Legacy: pay accepts[0] by a direct USDC transfer " +
+      "to payTo on Base, then retry with header 'X-Payment-Tx: <txHash>'.",
   };
 }
 
@@ -656,6 +1074,10 @@ function llmsTxt(origin: string): string {
     `- OpenAPI: ${origin}/openapi.json`,
     `- x402 index: ${origin}/.well-known/x402.json`,
     `- Health: ${origin}/health`,
+    "- Facilitator discovery: every 402 challenge declares extensions.bazaar; " +
+    "resources are cataloged after a settled payment by the settling " +
+    "facilitator's discovery catalog (CDP Bazaar when settled via the CDP " +
+    "Facilitator; the PayAI discovery catalog when settled via PayAI).",
     "",
   );
   return lines.join("\n");
@@ -749,30 +1171,42 @@ async function handler(req: Request): Promise<Response> {
   if (u.pathname === "/.well-known/x402.json") {
     return sendJson(200, {
       x402Version: 2,
-      resources: SERVICES.map((s) => ({
-        url: u.origin + s.path,
-        type: "http",
-        method: "GET",
-        description: s.description,
-        accepts: challenge(s.path, s).accepts,
-        proof:
-          "Pay accepts[0] by a direct USDC transfer to payTo on Base, " +
-          "then retry with header 'X-Payment-Tx: <txHash>'.",
-      })),
+      resources: SERVICES.map((s) => {
+        const ch = challenge(u.origin + s.path, s);
+        return {
+          url: u.origin + s.path,
+          type: "http",
+          method: "GET",
+          description: s.description,
+          accepts: ch.accepts,
+          extensions: ch.extensions,
+          proof: ch.proof,
+        };
+      }),
     });
   }
   if (u.pathname === "/x402/base-wallet-report") {
     // Paywall BEFORE request validation: an unpaid request always gets the
     // 402 challenge, even without ?address= (discovery tools like x402scan
-    // probe the bare URL and require a 402 there).
+    // probe the bare URL and require a 402 there; the Bazaar indexer probes
+    // with the declared example input and likewise requires the 402 first).
+    const absUrl = u.origin + WALLET_SERVICE.path;
+    const fac = await facilitatorGate(req, absUrl, WALLET_SERVICE);
+    if (fac && !fac.ok) {
+      return paymentRequired(
+        absUrl,
+        WALLET_SERVICE,
+        `Payment not accepted: ${fac.reason}`,
+      );
+    }
     const txhash = req.headers.get("x-payment-tx");
-    if (!txhash) {
-      return paymentRequired(WALLET_SERVICE.path, WALLET_SERVICE);
+    if (!txhash && !fac) {
+      return paymentRequired(absUrl, WALLET_SERVICE);
     }
     const address = u.searchParams.get("address") ?? "";
     if (!address) {
       return paymentRequired(
-        WALLET_SERVICE.path,
+        absUrl,
         WALLET_SERVICE,
         "Payment proof received, but the request is missing ?address=0x... — resend with the address to get the report.",
       );
@@ -782,33 +1216,48 @@ async function handler(req: Request): Promise<Response> {
         error: "address must be a 0x-prefixed 20-byte hex address",
       });
     }
-    const [ok, reason] = await verifyPayment(
-      txhash.trim(),
-      WALLET_SERVICE.priceAtomic,
-    );
-    if (!ok) {
-      return paymentRequired(
-        WALLET_SERVICE.path,
-        WALLET_SERVICE,
-        `Payment not accepted: ${reason}`,
+    if (!fac) {
+      const [ok, reason] = await verifyPayment(
+        (txhash as string).trim(),
+        WALLET_SERVICE.priceAtomic,
       );
+      if (!ok) {
+        return paymentRequired(
+          absUrl,
+          WALLET_SERVICE,
+          `Payment not accepted: ${reason}`,
+        );
+      }
     }
     try {
-      return sendJson(200, await walletReport(address));
+      const resp = sendJson(200, await walletReport(address));
+      if (fac?.paymentResponseHeader) {
+        resp.headers.set("payment-response", fac.paymentResponseHeader);
+      }
+      return resp;
     } catch (e) {
       return sendJson(502, { error: `report failed: ${e}` });
     }
   }
   if (u.pathname === "/x402/agent-reward-proof") {
     const service = REWARD_PROOF_SERVICE;
+    const absUrl = u.origin + service.path;
+    const fac = await facilitatorGate(req, absUrl, service);
+    if (fac && !fac.ok) {
+      return paymentRequired(
+        absUrl,
+        service,
+        `Payment not accepted: ${fac.reason}`,
+      );
+    }
     const txhash = req.headers.get("x-payment-tx");
-    if (!txhash) {
-      return paymentRequired(service.path, service);
+    if (!txhash && !fac) {
+      return paymentRequired(absUrl, service);
     }
     const subjectTx = u.searchParams.get("tx") ?? u.searchParams.get("txhash") ?? "";
     if (!subjectTx) {
       return paymentRequired(
-        service.path,
+        absUrl,
         service,
         "Payment proof received, but the request is missing ?tx=0x... for the transaction to inspect — resend with the subject transaction hash.",
       );
@@ -824,30 +1273,48 @@ async function handler(req: Request): Promise<Response> {
         error: "to must be a 0x-prefixed 20-byte hex address",
       });
     }
-    const [ok, reason] = await verifyPayment(txhash.trim(), service.priceAtomic);
-    if (!ok) {
-      return paymentRequired(
-        service.path,
-        service,
-        `Payment not accepted: ${reason}`,
+    if (!fac) {
+      const [ok, reason] = await verifyPayment(
+        (txhash as string).trim(),
+        service.priceAtomic,
       );
+      if (!ok) {
+        return paymentRequired(
+          absUrl,
+          service,
+          `Payment not accepted: ${reason}`,
+        );
+      }
     }
     try {
-      return sendJson(200, await rewardProof(subjectTx, expectedTo));
+      const resp = sendJson(200, await rewardProof(subjectTx, expectedTo));
+      if (fac?.paymentResponseHeader) {
+        resp.headers.set("payment-response", fac.paymentResponseHeader);
+      }
+      return resp;
     } catch (e) {
       return sendJson(502, { error: `reward proof failed: ${e}` });
     }
   }
   if (u.pathname === "/x402/base-token-snapshot") {
     const service = TOKEN_SNAPSHOT_SERVICE;
+    const absUrl = u.origin + service.path;
+    const fac = await facilitatorGate(req, absUrl, service);
+    if (fac && !fac.ok) {
+      return paymentRequired(
+        absUrl,
+        service,
+        `Payment not accepted: ${fac.reason}`,
+      );
+    }
     const txhash = req.headers.get("x-payment-tx");
-    if (!txhash) {
-      return paymentRequired(service.path, service);
+    if (!txhash && !fac) {
+      return paymentRequired(absUrl, service);
     }
     const address = u.searchParams.get("address") ?? "";
     if (!address) {
       return paymentRequired(
-        service.path,
+        absUrl,
         service,
         "Payment proof received, but the request is missing ?address=0x... — resend with the token address to get the snapshot.",
       );
@@ -857,16 +1324,25 @@ async function handler(req: Request): Promise<Response> {
         error: "address must be a 0x-prefixed 20-byte hex address",
       });
     }
-    const [ok, reason] = await verifyPayment(txhash.trim(), service.priceAtomic);
-    if (!ok) {
-      return paymentRequired(
-        service.path,
-        service,
-        `Payment not accepted: ${reason}`,
+    if (!fac) {
+      const [ok, reason] = await verifyPayment(
+        (txhash as string).trim(),
+        service.priceAtomic,
       );
+      if (!ok) {
+        return paymentRequired(
+          absUrl,
+          service,
+          `Payment not accepted: ${reason}`,
+        );
+      }
     }
     try {
-      return sendJson(200, await tokenSnapshot(address));
+      const resp = sendJson(200, await tokenSnapshot(address));
+      if (fac?.paymentResponseHeader) {
+        resp.headers.set("payment-response", fac.paymentResponseHeader);
+      }
+      return resp;
     } catch (e) {
       return sendJson(502, { error: `token snapshot failed: ${e}` });
     }
